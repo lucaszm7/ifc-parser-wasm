@@ -1,0 +1,17 @@
+InputStream:35:    // It is required to set the attributes of the `SurfaceTexture` in the
+InputStream:92:    /// - A old [`SurfaceTexture`] is still alive referencing an old surface.
+InputStream:111:    /// In order to present the [`SurfaceTexture`] returned by this method,
+InputStream:113:    /// Then [`SurfaceTexture::present`] needs to be called.
+InputStream:115:    /// If a [`SurfaceTexture`] referencing this surface is alive when [`Surface::configure()`]
+InputStream:118:    /// See the documentation of [`CurrentSurfaceTexture`] for how each possible result
+InputStream:120:    pub fn get_current_texture(&self) -> CurrentSurfaceTexture {
+InputStream:126:            SurfaceStatus::Timeout => return CurrentSurfaceTexture::Timeout,
+InputStream:127:            SurfaceStatus::Occluded => return CurrentSurfaceTexture::Occluded,
+InputStream:128:            SurfaceStatus::Outdated => return CurrentSurfaceTexture::Outdated,
+InputStream:129:            SurfaceStatus::Lost => return CurrentSurfaceTexture::Lost,
+InputStream:130:            SurfaceStatus::Validation => return CurrentSurfaceTexture::Validation,
+InputStream:155:                let surface_texture = SurfaceTexture {
+InputStream:164:                    CurrentSurfaceTexture::Suboptimal(surface_texture)
+InputStream:166:                    CurrentSurfaceTexture::Success(surface_texture)
+InputStream:169:            None => CurrentSurfaceTexture::Lost,
+

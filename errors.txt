@@ -1,0 +1,42 @@
+    Checking ifc-parser-wasm v0.1.0 (C:\Users\lucas\Desktop\web-bim-vis\ifc-parser-wasm)
+warning: unused import: `Deserialize`
+ --> src\lib.rs:2:24
+  |
+2 | use serde::{Serialize, Deserialize};
+  |                        ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: use of deprecated function `viewer::IfcViewer::new::{closure#0}::_::constructor`: async constructors produce invalid TS code and support will be removed in the future
+  --> src\viewer.rs:75:18
+   |
+75 |     pub async fn new(canvas_id: String) -> Result<IfcViewer, JsValue> {
+   |                  ^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+error[E0308]: mismatched types
+   --> src\viewer.rs:163:29
+    |
+163 |             immediate_size: None,
+    |                             ^^^^ expected `u32`, found `Option<_>`
+    |
+    = note: expected type `u32`
+               found enum `std::option::Option<_>`
+
+error[E0599]: no associated item named `Success` found for struct `SurfaceTexture` in the current scope
+   --> src\viewer.rs:383:35
+    |
+383 |             wgpu::SurfaceTexture::Success(t) => t,
+    |                                   ^^^^^^^ associated item not found in `SurfaceTexture`
+
+error[E0599]: no associated item named `Suboptimal` found for struct `SurfaceTexture` in the current scope
+   --> src\viewer.rs:384:35
+    |
+384 |             wgpu::SurfaceTexture::Suboptimal(t) => t,
+    |                                   ^^^^^^^^^^ associated item not found in `SurfaceTexture`
+
+Some errors have detailed explanations: E0308, E0599.
+For more information about an error, try `rustc --explain E0308`.
+warning: `ifc-parser-wasm` (lib) generated 2 warnings
+error: could not compile `ifc-parser-wasm` (lib) due to 3 previous errors; 2 warnings emitted
