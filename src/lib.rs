@@ -66,6 +66,8 @@ fn parse_internal(data: &str) -> Result<Option<SpatialNodeDto>, String> {
     let resolver = model.resolver();
     let spatial = model.spatial();
     
-    let root = spatial.spatial_tree().map(|tree| map_spatial_node(tree, resolver));
+    let root = spatial
+        .spatial_tree()
+        .map(|tree| map_spatial_node(tree, resolver));
     Ok(root)
 }

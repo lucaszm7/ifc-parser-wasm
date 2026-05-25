@@ -1,9 +1,9 @@
-use wasm_bindgen::prelude::*;
-use wgpu::util::DeviceExt;
-use glam::{Mat4, Vec3};
-use web_sys::HtmlCanvasElement;
-use bytemuck::{Pod, Zeroable};
 use bimifc_geometry::GeometryRouter;
+use bytemuck::{Pod, Zeroable};
+use glam::{Mat4, Vec3};
+use wasm_bindgen::prelude::*;
+use web_sys::HtmlCanvasElement;
+use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -54,14 +54,14 @@ pub struct IfcViewer {
     size: wgpu::Extent3d,
     render_pipeline: wgpu::RenderPipeline,
     depth_texture_view: wgpu::TextureView,
-    
+
     vertex_buffer: Option<wgpu::Buffer>,
     index_buffer: Option<wgpu::Buffer>,
     num_indices: u32,
-    
+
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    
+
     // camera controls
     target: Vec3,
     distance: f32,
@@ -75,16 +75,18 @@ impl IfcViewer {
     pub async fn new(canvas_id: String) -> Result<IfcViewer, JsValue> {
         let window = web_sys::window().unwrap();
         let document = window.document().unwrap();
-        let canvas = document.get_element_by_id(&canvas_id)
+        let canvas = document
+            .get_element_by_id(&canvas_id)
             .expect("Canvas not found")
             .dyn_into::<HtmlCanvasElement>()?;
-            
+
         let width = canvas.width();
         let height = canvas.height();
 
         let instance = wgpu::Instance::default();
-        
-        let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let adapter = instance
@@ -97,15 +99,13 @@ impl IfcViewer {
             .expect("Failed to create WebGPU adapter");
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: None,
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
-                    memory_hints: wgpu::MemoryHints::Performance,
-                    ..Default::default()
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                ..Default::default()
+            })
             .await
             .expect("Failed to request WebGPU device");
 
@@ -116,17 +116,15 @@ impl IfcViewer {
         let camera_uniform = CameraUniform {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
         };
-        let camera_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Camera Buffer"),
-                contents: bytemuck::cast_slice(&[camera_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
-        );
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
-        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
@@ -135,19 +133,16 @@ impl IfcViewer {
                         min_binding_size: None,
                     },
                     count: None,
-                }
-            ],
-            label: Some("camera_bind_group_layout"),
-        });
+                }],
+                label: Some("camera_bind_group_layout"),
+            });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
             label: Some("camera_bind_group"),
         });
 
@@ -157,11 +152,12 @@ impl IfcViewer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[Some(&camera_bind_group_layout)],
-            immediate_size: 0,
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[Some(&camera_bind_group_layout)],
+                immediate_size: 0,
+            });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -226,8 +222,7 @@ impl IfcViewer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -247,7 +242,7 @@ impl IfcViewer {
             camera_bind_group,
             target: Vec3::ZERO,
             distance: 50.0,
-            yaw: 0.785,  // 45 degrees
+            yaw: 0.785, // 45 degrees
             pitch: 0.5,
         })
     }
@@ -271,21 +266,23 @@ impl IfcViewer {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            self.depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.depth_texture_view =
+                depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         }
     }
 
     pub fn update_camera(&mut self) {
-        let eye = self.target + Vec3::new(
-            self.distance * self.yaw.sin() * self.pitch.cos(),
-            self.distance * self.pitch.sin(),
-            self.distance * self.yaw.cos() * self.pitch.cos()
-        );
+        let eye = self.target
+            + Vec3::new(
+                self.distance * self.yaw.sin() * self.pitch.cos(),
+                self.distance * self.pitch.sin(),
+                self.distance * self.yaw.cos() * self.pitch.cos(),
+            );
         let view = Mat4::look_at_rh(eye, self.target, Vec3::Y);
 
         // Scale near/far with distance so large buildings are never clipped
         let near = (self.distance * 0.001).max(0.01);
-        let far  = self.distance * 10.0 + 1000.0;
+        let far = self.distance * 10.0 + 1000.0;
 
         let proj = Mat4::perspective_rh(
             std::f32::consts::FRAC_PI_4,
@@ -298,17 +295,24 @@ impl IfcViewer {
         let camera_uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
         };
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[camera_uniform]),
+        );
     }
-    
+
     pub fn orbit_camera(&mut self, dx: f32, dy: f32) {
         self.yaw -= dx * 0.01;
         self.pitch += dy * 0.01;
         // Clamp pitch to avoid gimbal lock and looking upside down
-        self.pitch = self.pitch.clamp(-std::f32::consts::FRAC_PI_2 + 0.1, std::f32::consts::FRAC_PI_2 - 0.1);
+        self.pitch = self.pitch.clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.1,
+            std::f32::consts::FRAC_PI_2 - 0.1,
+        );
         self.update_camera();
     }
-    
+
     pub fn zoom_camera(&mut self, scroll: f32) {
         self.distance *= 1.0 + (scroll * 0.001);
         self.distance = self.distance.clamp(1.0, 1000.0);
@@ -326,28 +330,38 @@ impl IfcViewer {
         for id in resolver.all_ids() {
             if let Some(entity) = resolver.get(id) {
                 if let Ok(mesh) = router.process_element(&entity, resolver) {
-                    if mesh.is_empty() { continue; }
-                    
+                    if mesh.is_empty() {
+                        continue;
+                    }
+
                     let color = bimifc_model::geometry::get_default_color(&entity.ifc_type);
                     let start_index = all_vertices.len() as u32;
-                    
+
                     for i in 0..(mesh.positions.len() / 3) {
                         // WGPU expects position, normals and color arrays.
                         // Wait, check if mesh.normals hasn't same size
                         let (nx, ny, nz) = if mesh.normals.len() >= (i * 3 + 3) {
-                            (mesh.normals[i*3], mesh.normals[i*3+1], mesh.normals[i*3+2])
+                            (
+                                mesh.normals[i * 3],
+                                mesh.normals[i * 3 + 1],
+                                mesh.normals[i * 3 + 2],
+                            )
                         } else {
                             (0.0, 1.0, 0.0) // fallback
                         };
-                        
+
                         // bimifc typically yields Z as UP. For 3D viewers typically Y is UP. Let's fix axes:
                         all_vertices.push(Vertex {
-                            position: [mesh.positions[i*3], mesh.positions[i*3+2], -mesh.positions[i*3+1]],
+                            position: [
+                                mesh.positions[i * 3],
+                                mesh.positions[i * 3 + 2],
+                                -mesh.positions[i * 3 + 1],
+                            ],
                             normal: [nx, nz, -ny],
                             color,
                         });
                     }
-                    
+
                     for idx in mesh.indices {
                         all_indices.push(start_index + idx);
                     }
@@ -374,8 +388,8 @@ impl IfcViewer {
 
             self.target = center;
             self.distance = fit_distance.max(0.5);
-            self.yaw   = 0.785; // 45° isometric angle
-            self.pitch = 0.35;  // slightly above horizon
+            self.yaw = 0.785; // 45° isometric angle
+            self.pitch = 0.35; // slightly above horizon
             // Extend far plane to cover the whole model
             // (update_camera reads self.config.width/height for aspect ratio)
 
@@ -384,14 +398,14 @@ impl IfcViewer {
                     label: Some("IFC Vertex Buffer"),
                     contents: bytemuck::cast_slice(&all_vertices),
                     usage: wgpu::BufferUsages::VERTEX,
-                }
+                },
             ));
             self.index_buffer = Some(self.device.create_buffer_init(
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("IFC Index Buffer"),
                     contents: bytemuck::cast_slice(&all_indices),
                     usage: wgpu::BufferUsages::INDEX,
-                }
+                },
             ));
             self.num_indices = all_indices.len() as u32;
         }
@@ -406,11 +420,15 @@ impl IfcViewer {
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             _ => return Err(JsValue::from_str("Failed to get surface texture")),
         };
-        
-        let view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
+
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
