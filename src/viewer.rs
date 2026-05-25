@@ -71,8 +71,8 @@ pub struct IfcViewer {
 
 #[wasm_bindgen]
 impl IfcViewer {
-    #[wasm_bindgen(constructor)]
-    pub async fn new(canvas_id: String) -> Result<IfcViewer, JsValue> {
+    #[wasm_bindgen]
+    pub async fn create(canvas_id: String) -> Result<IfcViewer, JsValue> {
         let window = web_sys::window().unwrap();
         let document = window.document().unwrap();
         let canvas = document
