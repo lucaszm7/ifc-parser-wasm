@@ -356,6 +356,16 @@ impl IfcViewer {
         let mut all_indices = Vec::new();
         let mut custom_mapped_item_cache = std::collections::HashMap::new();
 
+        let mut wall_to_voids = std::collections::HashMap::new();
+        for rel_voids in resolver.entities_by_type(&bimifc_model::IfcType::IfcRelVoidsElement) {
+            if let (Some(wall_ref), Some(opening_ref)) = (rel_voids.get_ref(4), rel_voids.get_ref(5)) {
+                wall_to_voids
+                    .entry(wall_ref.0)
+                    .or_insert_with(Vec::new)
+                    .push(opening_ref.0);
+            }
+        }
+
         let mut standard_entities = Vec::new();
         let mut space_entities = Vec::new();
 
@@ -363,6 +373,10 @@ impl IfcViewer {
             if let Some(entity) = resolver.get(id) {
                 if entity.ifc_type == bimifc_model::IfcType::IfcSpace {
                     space_entities.push(entity);
+                } else if entity.ifc_type == bimifc_model::IfcType::IfcOpeningElement
+                    || entity.ifc_type == bimifc_model::IfcType::IfcOpeningStandardCase
+                {
+                    continue;
                 } else {
                     standard_entities.push(entity);
                 }
@@ -371,9 +385,26 @@ impl IfcViewer {
 
         // Loop over standard entities first
         for entity in standard_entities {
-            if let Ok(mesh) =
+            let has_voids = (entity.ifc_type == bimifc_model::IfcType::IfcWall
+                || entity.ifc_type == bimifc_model::IfcType::IfcWallStandardCase)
+                && wall_to_voids.contains_key(&entity.id.0);
+
+            let mesh_result = if has_voids {
+                let opening_ids = &wall_to_voids[&entity.id.0];
+                let mut opening_entities = Vec::new();
+                for op_id in opening_ids {
+                    if let Some(op_entity) = resolver.get(bimifc_model::EntityId(*op_id)) {
+                        opening_entities.push(op_entity);
+                    }
+                }
+                let refs: Vec<&bimifc_model::DecodedEntity> =
+                    opening_entities.iter().map(|arc| arc.as_ref()).collect();
+                subdivide_wall(&entity, &refs, resolver, &router, &mut custom_mapped_item_cache)
+            } else {
                 custom_process_element(&entity, resolver, &router, &mut custom_mapped_item_cache)
-            {
+            };
+
+            if let Ok(mesh) = mesh_result {
                 if mesh.is_empty() {
                     continue;
                 }
@@ -1048,4 +1079,310 @@ fn custom_process_element(
     }
 
     Ok(combined_mesh)
+}
+
+fn custom_process_element_local(
+    element: &bimifc_model::DecodedEntity,
+    resolver: &dyn bimifc_model::EntityResolver,
+    router: &bimifc_geometry::GeometryRouter,
+    cache: &mut std::collections::HashMap<u32, bimifc_geometry::Mesh>,
+) -> Result<bimifc_geometry::Mesh, bimifc_geometry::error::Error> {
+    let mut combined_mesh = bimifc_geometry::Mesh::new();
+
+    let rep_id = match element.get_ref(6) {
+        Some(id) => id,
+        None => return Ok(combined_mesh),
+    };
+
+    let representation = match resolver.get(rep_id) {
+        Some(rep) => rep,
+        None => return Ok(combined_mesh),
+    };
+
+    let reps = match representation.get(2) {
+        Some(bimifc_model::AttributeValue::List(list)) => list,
+        _ => return Ok(combined_mesh),
+    };
+
+    for rep_ref in reps {
+        if let Some(shape_rep_id) = rep_ref.as_entity_ref() {
+            if let Some(shape_rep) = resolver.get(shape_rep_id) {
+                if let Some(rep_id_str) = shape_rep.get_string(1) {
+                    if !matches!(
+                        rep_id_str,
+                        "Body" | "Facetation" | "Reference" | "MappedRepresentation"
+                    ) {
+                        continue;
+                    }
+                }
+
+                if let Some(mesh) =
+                    custom_process_shape_representation(&shape_rep, resolver, router, cache)?
+                {
+                    combined_mesh.merge(&mesh);
+                }
+            }
+        }
+    }
+
+    Ok(combined_mesh)
+}
+
+struct BBox {
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    min_z: f32,
+    max_z: f32,
+}
+
+fn add_quad(
+    mesh: &mut bimifc_geometry::Mesh,
+    p0: glam::Vec3,
+    p1: glam::Vec3,
+    p2: glam::Vec3,
+    p3: glam::Vec3,
+    normal: glam::Vec3,
+) {
+    let base_idx = mesh.vertex_count() as u32;
+    mesh.add_vertex(
+        nalgebra::Point3::new(p0.x as f64, p0.y as f64, p0.z as f64),
+        nalgebra::Vector3::new(normal.x as f64, normal.y as f64, normal.z as f64),
+    );
+    mesh.add_vertex(
+        nalgebra::Point3::new(p1.x as f64, p1.y as f64, p1.z as f64),
+        nalgebra::Vector3::new(normal.x as f64, normal.y as f64, normal.z as f64),
+    );
+    mesh.add_vertex(
+        nalgebra::Point3::new(p2.x as f64, p2.y as f64, p2.z as f64),
+        nalgebra::Vector3::new(normal.x as f64, normal.y as f64, normal.z as f64),
+    );
+    mesh.add_vertex(
+        nalgebra::Point3::new(p3.x as f64, p3.y as f64, p3.z as f64),
+        nalgebra::Vector3::new(normal.x as f64, normal.y as f64, normal.z as f64),
+    );
+    mesh.add_triangle(base_idx, base_idx + 1, base_idx + 2);
+    mesh.add_triangle(base_idx, base_idx + 2, base_idx + 3);
+}
+
+fn subdivide_wall(
+    wall_entity: &bimifc_model::DecodedEntity,
+    opening_entities: &[&bimifc_model::DecodedEntity],
+    resolver: &dyn bimifc_model::EntityResolver,
+    router: &bimifc_geometry::GeometryRouter,
+    cache: &mut std::collections::HashMap<u32, bimifc_geometry::Mesh>,
+) -> Result<bimifc_geometry::Mesh, bimifc_geometry::error::Error> {
+    let wall_local_mesh = custom_process_element_local(wall_entity, resolver, router, cache)?;
+    if wall_local_mesh.is_empty() {
+        return Ok(wall_local_mesh);
+    }
+
+    let (wall_min, wall_max) = wall_local_mesh.bounds();
+
+    let scale = router.unit_scale();
+    let wall_placement_id = wall_entity.get_ref(5);
+    let wall_transform = wall_placement_id
+        .and_then(|id| custom_resolve_placement(id, resolver))
+        .map(|mut transform| {
+            if scale != 1.0 {
+                transform[(0, 3)] *= scale;
+                transform[(1, 3)] *= scale;
+                transform[(2, 3)] *= scale;
+            }
+            transform
+        })
+        .unwrap_or_else(nalgebra::Matrix4::identity);
+
+    let wall_inv_transform = wall_transform
+        .try_inverse()
+        .unwrap_or_else(nalgebra::Matrix4::identity);
+
+    let mut opening_bboxes = Vec::new();
+    for op_entity in opening_entities {
+        let mut op_local_mesh = custom_process_element_local(op_entity, resolver, router, cache)?;
+        if op_local_mesh.is_empty() {
+            continue;
+        }
+
+        let op_placement_id = op_entity.get_ref(5);
+        let op_transform = op_placement_id
+            .and_then(|id| custom_resolve_placement(id, resolver))
+            .map(|mut transform| {
+                if scale != 1.0 {
+                    transform[(0, 3)] *= scale;
+                    transform[(1, 3)] *= scale;
+                    transform[(2, 3)] *= scale;
+                }
+                transform
+            })
+            .unwrap_or_else(nalgebra::Matrix4::identity);
+
+        let relative_transform = wall_inv_transform * op_transform;
+        bimifc_geometry::extrusion::apply_transform(&mut op_local_mesh, &relative_transform);
+
+        let (op_min, op_max) = op_local_mesh.bounds();
+        opening_bboxes.push(BBox {
+            min_x: op_min.x,
+            max_x: op_max.x,
+            min_y: op_min.y,
+            max_y: op_max.y,
+            min_z: op_min.z,
+            max_z: op_max.z,
+        });
+    }
+
+    if opening_bboxes.is_empty() {
+        let mut final_mesh = wall_local_mesh;
+        if wall_placement_id.is_some() {
+            bimifc_geometry::extrusion::apply_transform(&mut final_mesh, &wall_transform);
+        }
+        return Ok(final_mesh);
+    }
+
+    let mut x_coords = vec![wall_min.x, wall_max.x];
+    let mut z_coords = vec![wall_min.z, wall_max.z];
+
+    for bbox in &opening_bboxes {
+        x_coords.push(bbox.min_x.clamp(wall_min.x, wall_max.x));
+        x_coords.push(bbox.max_x.clamp(wall_min.x, wall_max.x));
+        z_coords.push(bbox.min_z.clamp(wall_min.z, wall_max.z));
+        z_coords.push(bbox.max_z.clamp(wall_min.z, wall_max.z));
+    }
+
+    fn clean_coords(coords: &mut Vec<f32>, epsilon: f32) {
+        coords.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut i = 0;
+        while i < coords.len() - 1 {
+            if (coords[i + 1] - coords[i]).abs() < epsilon {
+                coords.remove(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    let epsilon = 0.01;
+    clean_coords(&mut x_coords, epsilon);
+    clean_coords(&mut z_coords, epsilon);
+
+    let nx = x_coords.len() - 1;
+    let nz = z_coords.len() - 1;
+    let mut is_solid = vec![vec![false; nz]; nx];
+
+    for ix in 0..nx {
+        let x1 = x_coords[ix];
+        let x2 = x_coords[ix + 1];
+        for iz in 0..nz {
+            let z1 = z_coords[iz];
+            let z2 = z_coords[iz + 1];
+
+            let cx = (x1 + x2) * 0.5;
+            let cz = (z1 + z2) * 0.5;
+
+            let mut inside_void = false;
+            for bbox in &opening_bboxes {
+                let margin = 0.001; // 1 mm
+                if cx >= bbox.min_x + margin
+                    && cx <= bbox.max_x - margin
+                    && cz >= bbox.min_z + margin
+                    && cz <= bbox.max_z - margin
+                {
+                    inside_void = true;
+                    break;
+                }
+            }
+            is_solid[ix][iz] = !inside_void;
+        }
+    }
+
+    let mut subdivided_mesh = bimifc_geometry::Mesh::new();
+    let y1 = wall_min.y;
+    let y2 = wall_max.y;
+
+    for ix in 0..nx {
+        let x1 = x_coords[ix];
+        let x2 = x_coords[ix + 1];
+        for iz in 0..nz {
+            if !is_solid[ix][iz] {
+                continue;
+            }
+            let z1 = z_coords[iz];
+            let z2 = z_coords[iz + 1];
+
+            // Front face (Y = y2, Normal = (0, 1, 0))
+            add_quad(
+                &mut subdivided_mesh,
+                glam::Vec3::new(x1, y2, z1),
+                glam::Vec3::new(x1, y2, z2),
+                glam::Vec3::new(x2, y2, z2),
+                glam::Vec3::new(x2, y2, z1),
+                glam::Vec3::new(0.0, 1.0, 0.0),
+            );
+
+            // Back face (Y = y1, Normal = (0, -1, 0))
+            add_quad(
+                &mut subdivided_mesh,
+                glam::Vec3::new(x1, y1, z1),
+                glam::Vec3::new(x2, y1, z1),
+                glam::Vec3::new(x2, y1, z2),
+                glam::Vec3::new(x1, y1, z2),
+                glam::Vec3::new(0.0, -1.0, 0.0),
+            );
+
+            // Left face (X = x1, Normal = (-1, 0, 0))
+            if ix == 0 || !is_solid[ix - 1][iz] {
+                add_quad(
+                    &mut subdivided_mesh,
+                    glam::Vec3::new(x1, y1, z1),
+                    glam::Vec3::new(x1, y1, z2),
+                    glam::Vec3::new(x1, y2, z2),
+                    glam::Vec3::new(x1, y2, z1),
+                    glam::Vec3::new(-1.0, 0.0, 0.0),
+                );
+            }
+
+            // Right face (X = x2, Normal = (1, 0, 0))
+            if ix == nx - 1 || !is_solid[ix + 1][iz] {
+                add_quad(
+                    &mut subdivided_mesh,
+                    glam::Vec3::new(x2, y1, z1),
+                    glam::Vec3::new(x2, y2, z1),
+                    glam::Vec3::new(x2, y2, z2),
+                    glam::Vec3::new(x2, y1, z2),
+                    glam::Vec3::new(1.0, 0.0, 0.0),
+                );
+            }
+
+            // Bottom face (Z = z1, Normal = (0, 0, -1))
+            if iz == 0 || !is_solid[ix][iz - 1] {
+                add_quad(
+                    &mut subdivided_mesh,
+                    glam::Vec3::new(x1, y1, z1),
+                    glam::Vec3::new(x1, y2, z1),
+                    glam::Vec3::new(x2, y2, z1),
+                    glam::Vec3::new(x2, y1, z1),
+                    glam::Vec3::new(0.0, 0.0, -1.0),
+                );
+            }
+
+            // Top face (Z = z2, Normal = (0, 0, 1))
+            if iz == nz - 1 || !is_solid[ix][iz + 1] {
+                add_quad(
+                    &mut subdivided_mesh,
+                    glam::Vec3::new(x1, y1, z2),
+                    glam::Vec3::new(x2, y1, z2),
+                    glam::Vec3::new(x2, y2, z2),
+                    glam::Vec3::new(x1, y2, z2),
+                    glam::Vec3::new(0.0, 0.0, 1.0),
+                );
+            }
+        }
+    }
+
+    if wall_placement_id.is_some() {
+        bimifc_geometry::extrusion::apply_transform(&mut subdivided_mesh, &wall_transform);
+    }
+
+    Ok(subdivided_mesh)
 }
