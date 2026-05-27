@@ -100,11 +100,21 @@ impl IfcViewer {
             .await
             .expect("Failed to create WebGPU adapter");
 
+        // Query the adapter's actual supported limits so we can raise max_buffer_size
+        // beyond the conservative 256 MB cap of downlevel_webgl2_defaults().
+        // The browser warns: "this adapter supports a higher maxBufferSize of 2147483648,
+        // which can be specified in requiredLimits when calling requestDevice()."
+        let adapter_limits = adapter.limits();
+        let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults();
+        // Use up to 2 GB for vertex/index buffers, capped by what the adapter reports.
+        required_limits.max_buffer_size = adapter_limits.max_buffer_size
+            .min(2u64 * 1024 * 1024 * 1024); // 2 GiB ceiling
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
             })
