@@ -354,6 +354,9 @@ impl IfcViewer {
             model.unit_scale()
         )));
 
+        let mut standard_entities = Vec::new();
+        let mut space_entities = Vec::new();
+
         let mut logged = 0;
         for id in resolver.all_ids() {
             if let Some(entity) = resolver.get(id) {
@@ -373,47 +376,90 @@ impl IfcViewer {
                     logged += 1;
                 }
 
-                if let Ok(mesh) = custom_process_element(
-                    &entity,
-                    resolver,
-                    &router,
-                    &mut custom_mapped_item_cache,
-                ) {
-                    if mesh.is_empty() {
-                        continue;
-                    }
+                if entity.ifc_type == bimifc_model::IfcType::IfcSpace {
+                    space_entities.push(entity);
+                } else {
+                    standard_entities.push(entity);
+                }
+            }
+        }
 
-                    let color = bimifc_model::geometry::get_default_color(&entity.ifc_type);
-                    let start_index = all_vertices.len() as u32;
+        // Loop over standard entities first
+        for entity in standard_entities {
+            if let Ok(mesh) =
+                custom_process_element(&entity, resolver, &router, &mut custom_mapped_item_cache)
+            {
+                if mesh.is_empty() {
+                    continue;
+                }
 
-                    for i in 0..(mesh.positions.len() / 3) {
-                        // WGPU expects position, normals and color arrays.
-                        // Wait, check if mesh.normals hasn't same size
-                        let (nx, ny, nz) = if mesh.normals.len() >= (i * 3 + 3) {
-                            (
-                                mesh.normals[i * 3],
-                                mesh.normals[i * 3 + 1],
-                                mesh.normals[i * 3 + 2],
-                            )
-                        } else {
-                            (0.0, 1.0, 0.0) // fallback
-                        };
+                let color = bimifc_model::geometry::get_default_color(&entity.ifc_type);
+                let start_index = all_vertices.len() as u32;
 
-                        // bimifc typically yields Z as UP. For 3D viewers typically Y is UP. Let's fix axes:
-                        all_vertices.push(Vertex {
-                            position: [
-                                mesh.positions[i * 3],
-                                mesh.positions[i * 3 + 2],
-                                -mesh.positions[i * 3 + 1],
-                            ],
-                            normal: [nx, nz, -ny],
-                            color,
-                        });
-                    }
+                for i in 0..(mesh.positions.len() / 3) {
+                    let (nx, ny, nz) = if mesh.normals.len() >= (i * 3 + 3) {
+                        (
+                            mesh.normals[i * 3],
+                            mesh.normals[i * 3 + 1],
+                            mesh.normals[i * 3 + 2],
+                        )
+                    } else {
+                        (0.0, 1.0, 0.0)
+                    };
 
-                    for idx in mesh.indices {
-                        all_indices.push(start_index + idx);
-                    }
+                    all_vertices.push(Vertex {
+                        position: [
+                            mesh.positions[i * 3],
+                            mesh.positions[i * 3 + 2],
+                            -mesh.positions[i * 3 + 1],
+                        ],
+                        normal: [nx, nz, -ny],
+                        color,
+                    });
+                }
+
+                for idx in mesh.indices {
+                    all_indices.push(start_index + idx);
+                }
+            }
+        }
+
+        // Loop over space entities second
+        for entity in space_entities {
+            if let Ok(mesh) =
+                custom_process_element(&entity, resolver, &router, &mut custom_mapped_item_cache)
+            {
+                if mesh.is_empty() {
+                    continue;
+                }
+
+                let color = [0.6, 0.8, 1.0, 0.2];
+                let start_index = all_vertices.len() as u32;
+
+                for i in 0..(mesh.positions.len() / 3) {
+                    let (nx, ny, nz) = if mesh.normals.len() >= (i * 3 + 3) {
+                        (
+                            mesh.normals[i * 3],
+                            mesh.normals[i * 3 + 1],
+                            mesh.normals[i * 3 + 2],
+                        )
+                    } else {
+                        (0.0, 1.0, 0.0)
+                    };
+
+                    all_vertices.push(Vertex {
+                        position: [
+                            mesh.positions[i * 3],
+                            mesh.positions[i * 3 + 2],
+                            -mesh.positions[i * 3 + 1],
+                        ],
+                        normal: [nx, nz, -ny],
+                        color,
+                    });
+                }
+
+                for idx in mesh.indices {
+                    all_indices.push(start_index + idx);
                 }
             }
         }
