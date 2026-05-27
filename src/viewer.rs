@@ -107,7 +107,8 @@ impl IfcViewer {
         let adapter_limits = adapter.limits();
         let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults();
         // Use up to 2 GB for vertex/index buffers, capped by what the adapter reports.
-        required_limits.max_buffer_size = adapter_limits.max_buffer_size
+        required_limits.max_buffer_size = adapter_limits
+            .max_buffer_size
             .min(2u64 * 1024 * 1024 * 1024); // 2 GiB ceiling
 
         let (device, queue) = adapter
@@ -202,7 +203,7 @@ impl IfcViewer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // No backface culling since standard IFC geometries might be open
+                cull_mode: Some(wgpu::Face::Back),
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
@@ -357,6 +358,27 @@ impl IfcViewer {
         self.update_camera();
     }
 
+    /// Pan the camera target in screen space.
+    /// `dx` / `dy` are pixel deltas from pointer movement.
+    pub fn pan_camera(&mut self, dx: f32, dy: f32) {
+        // Rebuild the camera-space axes from yaw/pitch
+        let eye_dir = Vec3::new(
+            self.yaw.sin() * self.pitch.cos(),
+            self.pitch.sin(),
+            self.yaw.cos() * self.pitch.cos(),
+        );
+        // right = normalize(cross(eye_dir, world_up))
+        let right = eye_dir.cross(Vec3::Y).normalize();
+        // true camera-up (perpendicular to forward and right)
+        let up = right.cross(eye_dir).normalize();
+
+        // Pan speed scales with distance so it feels consistent at any zoom
+        let speed = self.distance * 0.0015;
+        self.target += right * (dx * speed);
+        self.target += up * (dy * speed);
+        self.update_camera();
+    }
+
     pub fn load_ifc_geometry(&mut self, data: &str) -> Result<(), JsValue> {
         let model = bimifc_parser::parse(data).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let resolver = model.resolver();
@@ -368,7 +390,9 @@ impl IfcViewer {
 
         let mut wall_to_voids = std::collections::HashMap::new();
         for rel_voids in resolver.entities_by_type(&bimifc_model::IfcType::IfcRelVoidsElement) {
-            if let (Some(wall_ref), Some(opening_ref)) = (rel_voids.get_ref(4), rel_voids.get_ref(5)) {
+            if let (Some(wall_ref), Some(opening_ref)) =
+                (rel_voids.get_ref(4), rel_voids.get_ref(5))
+            {
                 wall_to_voids
                     .entry(wall_ref.0)
                     .or_insert_with(Vec::new)
@@ -409,7 +433,13 @@ impl IfcViewer {
                 }
                 let refs: Vec<&bimifc_model::DecodedEntity> =
                     opening_entities.iter().map(|arc| arc.as_ref()).collect();
-                subdivide_wall(&entity, &refs, resolver, &router, &mut custom_mapped_item_cache)
+                subdivide_wall(
+                    &entity,
+                    &refs,
+                    resolver,
+                    &router,
+                    &mut custom_mapped_item_cache,
+                )
             } else {
                 custom_process_element(&entity, resolver, &router, &mut custom_mapped_item_cache)
             };
@@ -661,7 +691,7 @@ impl IfcViewer {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
+                    cull_mode: Some(wgpu::Face::Back),
                     unclipped_depth: false,
                     polygon_mode: wgpu::PolygonMode::Fill,
                     conservative: false,
