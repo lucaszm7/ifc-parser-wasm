@@ -55,6 +55,7 @@ pub struct IfcViewer {
     size: wgpu::Extent3d,
     render_pipeline: wgpu::RenderPipeline,
     depth_texture_view: wgpu::TextureView,
+    msaa_texture_view: wgpu::TextureView,
 
     vertex_buffer: Option<wgpu::Buffer>,
     index_buffer: Option<wgpu::Buffer>,
@@ -204,7 +205,7 @@ impl IfcViewer {
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState {
-                count: 1,
+                count: 4,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -220,13 +221,25 @@ impl IfcViewer {
             label: Some("Depth Texture"),
             size,
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: 4,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let msaa_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("MSAA Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 4,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let msaa_texture_view = msaa_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         Ok(Self {
             surface,
@@ -236,6 +249,7 @@ impl IfcViewer {
             size,
             render_pipeline,
             depth_texture_view,
+            msaa_texture_view,
             vertex_buffer: None,
             index_buffer: None,
             num_indices: 0,
@@ -260,7 +274,7 @@ impl IfcViewer {
                 label: Some("Depth Texture"),
                 size: self.size,
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: 4,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -269,6 +283,19 @@ impl IfcViewer {
             });
             self.depth_texture_view =
                 depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let msaa_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("MSAA Texture"),
+                size: self.size,
+                mip_level_count: 1,
+                sample_count: 4,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.msaa_texture_view =
+                msaa_texture.create_view(&wgpu::TextureViewDescriptor::default());
         }
     }
 
@@ -329,53 +356,11 @@ impl IfcViewer {
         let mut all_indices = Vec::new();
         let mut custom_mapped_item_cache = std::collections::HashMap::new();
 
-        for id in 1..=50 {
-            if let Some(entity) = resolver.get(bimifc_model::EntityId(id)) {
-                if entity.ifc_type == bimifc_model::IfcType::IfcDirection
-                    || entity.ifc_type == bimifc_model::IfcType::IfcCartesianPoint
-                {
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "DIR/POINT: id={} type={:?} attrs={:?}",
-                        id, entity.ifc_type, entity.attributes
-                    )));
-                }
-            }
-        }
-
-        if let Some(entity) = resolver.get(bimifc_model::EntityId(5527)) {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "WALL LOCATION 5527: attrs={:?}",
-                entity.attributes
-            )));
-        }
-
-        web_sys::console::log_1(&JsValue::from_str(&format!(
-            "MODEL UNIT SCALE: {:?}",
-            model.unit_scale()
-        )));
-
         let mut standard_entities = Vec::new();
         let mut space_entities = Vec::new();
 
-        let mut logged = 0;
         for id in resolver.all_ids() {
             if let Some(entity) = resolver.get(id) {
-                if logged < 15
-                    && (entity.ifc_type == bimifc_model::IfcType::IfcWall
-                        || entity.ifc_type == bimifc_model::IfcType::IfcWallStandardCase
-                        || entity.ifc_type == bimifc_model::IfcType::IfcSlab
-                        || entity.ifc_type == bimifc_model::IfcType::IfcRoof)
-                {
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "LOG ENTITY: id={:?} type={:?} attrs={:?}",
-                        entity.id, entity.ifc_type, entity.attributes
-                    )));
-                    if let Some(placement_id) = entity.get_ref(5) {
-                        log_placement_chain(placement_id, resolver, "  ");
-                    }
-                    logged += 1;
-                }
-
                 if entity.ifc_type == bimifc_model::IfcType::IfcSpace {
                     space_entities.push(entity);
                 } else {
@@ -529,8 +514,8 @@ impl IfcViewer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: &self.msaa_texture_view,
+                    resolve_target: Some(&view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.05,
@@ -538,7 +523,7 @@ impl IfcViewer {
                             b: 0.05,
                             a: 0.0,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Discard,
                     },
                     depth_slice: None,
                 })],
@@ -648,7 +633,7 @@ impl IfcViewer {
                     bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState {
-                    count: 1,
+                    count: 4,
                     mask: !0,
                     alpha_to_coverage_enabled: false,
                 },
@@ -1051,16 +1036,6 @@ fn custom_process_element(
     // Apply object placement transform
     if let Some(placement_id) = element.get_ref(5) {
         if let Some(mut transform) = custom_resolve_placement(placement_id, resolver) {
-            if element.id.0 == 5548 {
-                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-                    "WALL 5548 LOCAL BOUNDS: {:?}",
-                    combined_mesh.bounds()
-                )));
-                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-                    "WALL 5548 TRANSFORM MATRIX: {:?}",
-                    transform
-                )));
-            }
             // Scale translation components from file units to meters
             let scale = router.unit_scale();
             if scale != 1.0 {
@@ -1069,42 +1044,8 @@ fn custom_process_element(
                 transform[(2, 3)] *= scale;
             }
             bimifc_geometry::extrusion::apply_transform(&mut combined_mesh, &transform);
-            if element.id.0 == 5548 {
-                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-                    "WALL 5548 TRANSFORMED BOUNDS: {:?}",
-                    combined_mesh.bounds()
-                )));
-            }
         }
     }
 
     Ok(combined_mesh)
-}
-
-fn log_placement_chain(
-    placement_id: bimifc_model::EntityId,
-    resolver: &dyn bimifc_model::EntityResolver,
-    indent: &str,
-) {
-    if let Some(placement) = resolver.get(placement_id) {
-        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-            "{}PLACEMENT: id={:?} type={:?} attrs={:?}",
-            indent, placement_id, placement.ifc_type, placement.attributes
-        )));
-        if placement.ifc_type == bimifc_model::IfcType::IfcLocalPlacement {
-            // RelTo (index 0)
-            if let Some(rel_to_id) = placement.get_ref(0) {
-                log_placement_chain(rel_to_id, resolver, &format!("{}  ", indent));
-            }
-            // Relative (index 1)
-            if let Some(rel_id) = placement.get_ref(1) {
-                if let Some(rel) = resolver.get(rel_id) {
-                    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-                        "{}  RELATIVE: id={:?} type={:?} attrs={:?}",
-                        indent, rel_id, rel.ifc_type, rel.attributes
-                    )));
-                }
-            }
-        }
-    }
 }
