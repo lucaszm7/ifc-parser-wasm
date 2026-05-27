@@ -404,6 +404,7 @@ dependencies = [
  "console_error_panic_hook",
  "glam",
  "js-sys",
+ "nalgebra",
  "pollster",
  "serde",
  "serde_json",

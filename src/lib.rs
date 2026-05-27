@@ -2,6 +2,7 @@ use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
 use bimifc_model::{SpatialNode, EntityResolver};
 
+#[cfg(target_arch = "wasm32")]
 pub mod viewer;
 
 #[derive(Serialize)]

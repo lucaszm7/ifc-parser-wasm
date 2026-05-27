@@ -1,4 +1,5 @@
 use bimifc_geometry::GeometryRouter;
+use bimifc_geometry::transform::{resolve_cartesian_point, resolve_direction};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wasm_bindgen::prelude::*;
@@ -322,14 +323,62 @@ impl IfcViewer {
     pub fn load_ifc_geometry(&mut self, data: &str) -> Result<(), JsValue> {
         let model = bimifc_parser::parse(data).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let resolver = model.resolver();
-        let router = GeometryRouter::with_default_processors_and_unit_scale(1.0);
+        let router = GeometryRouter::with_default_processors_and_unit_scale(model.unit_scale());
 
         let mut all_vertices = Vec::new();
         let mut all_indices = Vec::new();
+        let mut custom_mapped_item_cache = std::collections::HashMap::new();
 
+        for id in 1..=50 {
+            if let Some(entity) = resolver.get(bimifc_model::EntityId(id)) {
+                if entity.ifc_type == bimifc_model::IfcType::IfcDirection
+                    || entity.ifc_type == bimifc_model::IfcType::IfcCartesianPoint
+                {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "DIR/POINT: id={} type={:?} attrs={:?}",
+                        id, entity.ifc_type, entity.attributes
+                    )));
+                }
+            }
+        }
+
+        if let Some(entity) = resolver.get(bimifc_model::EntityId(5527)) {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "WALL LOCATION 5527: attrs={:?}",
+                entity.attributes
+            )));
+        }
+
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "MODEL UNIT SCALE: {:?}",
+            model.unit_scale()
+        )));
+
+        let mut logged = 0;
         for id in resolver.all_ids() {
             if let Some(entity) = resolver.get(id) {
-                if let Ok(mesh) = router.process_element(&entity, resolver) {
+                if logged < 15
+                    && (entity.ifc_type == bimifc_model::IfcType::IfcWall
+                        || entity.ifc_type == bimifc_model::IfcType::IfcWallStandardCase
+                        || entity.ifc_type == bimifc_model::IfcType::IfcSlab
+                        || entity.ifc_type == bimifc_model::IfcType::IfcRoof)
+                {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "LOG ENTITY: id={:?} type={:?} attrs={:?}",
+                        entity.id, entity.ifc_type, entity.attributes
+                    )));
+                    if let Some(placement_id) = entity.get_ref(5) {
+                        log_placement_chain(placement_id, resolver, "  ");
+                    }
+                    logged += 1;
+                }
+
+                if let Ok(mesh) = custom_process_element(
+                    &entity,
+                    resolver,
+                    &router,
+                    &mut custom_mapped_item_cache,
+                ) {
                     if mesh.is_empty() {
                         continue;
                     }
@@ -477,85 +526,539 @@ impl IfcViewer {
 
     pub fn update_shader(&mut self, source: String) -> Result<(), JsValue> {
         let camera_bind_group_layout =
-            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("camera_bind_group_layout"),
-            });
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                    label: Some("camera_bind_group_layout"),
+                });
 
         let render_pipeline_layout =
-            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[Some(&camera_bind_group_layout)],
-                immediate_size: 0,
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Render Pipeline Layout"),
+                    bind_group_layouts: &[Some(&camera_bind_group_layout)],
+                    immediate_size: 0,
+                });
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Shader"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
             });
 
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
-
-        let render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            multiview_mask: None,
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::OVER,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            cache: None,
-        });
+        let render_pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Render Pipeline"),
+                multiview_mask: None,
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Vertex::desc()],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.config.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                cache: None,
+            });
 
         self.render_pipeline = render_pipeline;
         Ok(())
     }
 }
 
+// Custom placement and transform resolution logic to override buggy bimifc-geometry implementation
+fn custom_resolve_axis_placement(
+    placement_id: bimifc_model::EntityId,
+    resolver: &dyn bimifc_model::EntityResolver,
+) -> Option<nalgebra::Matrix4<f64>> {
+    let placement = resolver.get(placement_id)?;
+
+    if placement.ifc_type != bimifc_model::IfcType::IfcAxis2Placement3D {
+        return None;
+    }
+
+    // Location (index 0)
+    let location = resolve_cartesian_point(placement.get_ref(0)?, resolver)?;
+
+    // Axis (index 1) - Z direction, optional
+    let axis = placement
+        .get_ref(1)
+        .and_then(|id| resolve_direction(id, resolver))
+        .unwrap_or_else(|| nalgebra::Vector3::new(0.0, 0.0, 1.0));
+
+    // RefDirection (index 2) - X direction, optional
+    let ref_dir = placement
+        .get_ref(2)
+        .and_then(|id| resolve_direction(id, resolver))
+        .unwrap_or_else(|| nalgebra::Vector3::new(1.0, 0.0, 0.0));
+
+    // Build orthonormal basis
+    let z = axis.normalize();
+    let x = ref_dir.normalize();
+    let mut y = z.cross(&x);
+    if y.norm_squared() < 1e-6 {
+        y = z.cross(&nalgebra::Vector3::new(0.0, 1.0, 0.0));
+        if y.norm_squared() < 1e-6 {
+            y = z.cross(&nalgebra::Vector3::new(0.0, 0.0, 1.0));
+        }
+    }
+    let y = y.normalize();
+    let x = y.cross(&z).normalize();
+
+    Some(nalgebra::Matrix4::new(
+        x.x, y.x, z.x, location.x, x.y, y.y, z.y, location.y, x.z, y.z, z.z, location.z, 0.0, 0.0,
+        0.0, 1.0,
+    ))
+}
+
+fn custom_resolve_transformation_operator(
+    op_id: bimifc_model::EntityId,
+    resolver: &dyn bimifc_model::EntityResolver,
+) -> Option<nalgebra::Matrix4<f64>> {
+    let op = resolver.get(op_id)?;
+
+    // Axis1 (index 0) - X direction, optional
+    let axis1 = op
+        .get_ref(0)
+        .and_then(|id| resolve_direction(id, resolver))
+        .unwrap_or_else(|| nalgebra::Vector3::new(1.0, 0.0, 0.0));
+
+    // Axis2 (index 1) - Y direction, optional
+    let _axis2 = op
+        .get_ref(1)
+        .and_then(|id| resolve_direction(id, resolver))
+        .unwrap_or_else(|| nalgebra::Vector3::new(0.0, 1.0, 0.0));
+
+    // LocalOrigin (index 2)
+    let origin = op
+        .get_ref(2)
+        .and_then(|id| resolve_cartesian_point(id, resolver))
+        .unwrap_or_else(|| nalgebra::Point3::new(0.0, 0.0, 0.0));
+
+    // Scale (index 3) - uniform scale, optional, default 1.0
+    let scale = op.get_float(3).unwrap_or(1.0);
+
+    // Axis3 (index 4) - Z direction, optional
+    let axis3 = op
+        .get_ref(4)
+        .and_then(|id| resolve_direction(id, resolver))
+        .unwrap_or_else(|| nalgebra::Vector3::new(0.0, 0.0, 1.0));
+
+    // Scale2 (index 5) and Scale3 (index 6) for non-uniform operators
+    let scale2 =
+        if op.ifc_type == bimifc_model::IfcType::IfcCartesianTransformationOperator3DnonUniform {
+            op.get_float(5).unwrap_or(scale)
+        } else {
+            scale
+        };
+    let scale3 =
+        if op.ifc_type == bimifc_model::IfcType::IfcCartesianTransformationOperator3DnonUniform {
+            op.get_float(6).unwrap_or(scale)
+        } else {
+            scale
+        };
+
+    // Build orthonormal basis
+    let z = axis3.normalize();
+    let x = axis1.normalize();
+    let mut y = z.cross(&x);
+    if y.norm_squared() < 1e-6 {
+        y = z.cross(&nalgebra::Vector3::new(0.0, 1.0, 0.0));
+        if y.norm_squared() < 1e-6 {
+            y = z.cross(&nalgebra::Vector3::new(0.0, 0.0, 1.0));
+        }
+    }
+    let y = y.normalize();
+    let x = y.cross(&z).normalize();
+
+    // Apply scale to the basis vectors
+    let col0 = x * scale;
+    let col1 = y * scale2;
+    let col2 = z * scale3;
+
+    Some(nalgebra::Matrix4::new(
+        col0.x, col1.x, col2.x, origin.x, col0.y, col1.y, col2.y, origin.y, col0.z, col1.z, col2.z,
+        origin.z, 0.0, 0.0, 0.0, 1.0,
+    ))
+}
+
+fn custom_resolve_placement(
+    placement_id: bimifc_model::EntityId,
+    resolver: &dyn bimifc_model::EntityResolver,
+) -> Option<nalgebra::Matrix4<f64>> {
+    let placement = resolver.get(placement_id)?;
+
+    match placement.ifc_type {
+        bimifc_model::IfcType::IfcLocalPlacement => {
+            // Recursively resolve parent placement (attribute 0: PlacementRelTo)
+            let parent_transform = placement
+                .get_ref(0)
+                .and_then(|parent_id| custom_resolve_placement(parent_id, resolver))
+                .unwrap_or_else(nalgebra::Matrix4::identity);
+
+            // Resolve local transform (attribute 1: RelativePlacement)
+            let local_transform = placement
+                .get_ref(1)
+                .and_then(|rel_id| custom_resolve_placement(rel_id, resolver))
+                .unwrap_or_else(nalgebra::Matrix4::identity);
+
+            Some(parent_transform * local_transform)
+        }
+        bimifc_model::IfcType::IfcAxis2Placement3D => {
+            custom_resolve_axis_placement(placement_id, resolver)
+        }
+        bimifc_model::IfcType::IfcCartesianTransformationOperator3D
+        | bimifc_model::IfcType::IfcCartesianTransformationOperator3DnonUniform => {
+            custom_resolve_transformation_operator(placement_id, resolver)
+        }
+        _ => None,
+    }
+}
+
+fn custom_process_mapped_item(
+    entity: &bimifc_model::DecodedEntity,
+    resolver: &dyn bimifc_model::EntityResolver,
+    router: &bimifc_geometry::GeometryRouter,
+    cache: &mut std::collections::HashMap<u32, bimifc_geometry::Mesh>,
+) -> Result<Option<bimifc_geometry::Mesh>, bimifc_geometry::error::Error> {
+    // Extract source_id (MappingSource -> RepresentationMap -> MappedRepresentation)
+    let source_id = entity
+        .get_ref(0)
+        .and_then(|map_id| resolver.get(map_id))
+        .and_then(|rep_map| rep_map.get_ref(1))
+        .map(|id| id.0);
+
+    if let Some(sid) = source_id {
+        if let Some(cached) = cache.get(&sid) {
+            let mut mesh = cached.clone();
+            if let Some(transform_id) = entity.get_ref(1) {
+                if let Some(transform) = custom_resolve_placement(transform_id, resolver) {
+                    bimifc_geometry::extrusion::apply_transform(&mut mesh, &transform);
+                }
+            }
+            custom_scale_mesh(&mut mesh, router.unit_scale());
+            return Ok(Some(mesh));
+        }
+    }
+
+    // Not cached - resolve the source representation and process its items
+    if let Some(map_id) = entity.get_ref(0) {
+        if let Some(rep_map) = resolver.get(map_id) {
+            if let Some(shape_rep_id) = rep_map.get_ref(1) {
+                if let Some(shape_rep) = resolver.get(shape_rep_id) {
+                    if let Some(mut mesh) =
+                        custom_process_shape_representation(&shape_rep, resolver, router, cache)?
+                    {
+                        if let Some(sid) = source_id {
+                            cache.insert(sid, mesh.clone());
+                        }
+                        if let Some(transform_id) = entity.get_ref(1) {
+                            if let Some(transform) =
+                                custom_resolve_placement(transform_id, resolver)
+                            {
+                                bimifc_geometry::extrusion::apply_transform(&mut mesh, &transform);
+                            }
+                        }
+                        custom_scale_mesh(&mut mesh, router.unit_scale());
+                        return Ok(Some(mesh));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn custom_scale_mesh(mesh: &mut bimifc_geometry::Mesh, unit_scale: f64) {
+    if unit_scale != 1.0 {
+        let scale = unit_scale as f32;
+        for pos in mesh.positions.iter_mut() {
+            *pos *= scale;
+        }
+    }
+}
+
+fn resolve_axis2_placement_2d(
+    placement_id: bimifc_model::EntityId,
+    resolver: &dyn bimifc_model::EntityResolver,
+) -> Option<nalgebra::Matrix4<f64>> {
+    let placement = resolver.get(placement_id)?;
+    if placement.ifc_type != bimifc_model::IfcType::IfcAxis2Placement2D {
+        return None;
+    }
+
+    let location_id = placement.get_ref(0)?;
+    let location_entity = resolver.get(location_id)?;
+    let coords = location_entity.get(0)?.as_list()?;
+    let x = coords.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+    let y = coords.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+
+    let ref_dir = placement
+        .get_ref(1)
+        .and_then(|id| {
+            let dir_entity = resolver.get(id)?;
+            let ratios = dir_entity.get(0)?.as_list()?;
+            let dx = ratios.first().and_then(|v| v.as_float()).unwrap_or(1.0);
+            let dy = ratios.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+            Some(nalgebra::Vector2::new(dx, dy).normalize())
+        })
+        .unwrap_or_else(|| nalgebra::Vector2::new(1.0, 0.0));
+
+    let u = ref_dir;
+    let v = nalgebra::Vector2::new(-u.y, u.x);
+
+    Some(nalgebra::Matrix4::new(
+        u.x, v.x, 0.0, x, u.y, v.y, 0.0, y, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ))
+}
+
+fn custom_process_shape_representation(
+    shape_rep: &bimifc_model::DecodedEntity,
+    resolver: &dyn bimifc_model::EntityResolver,
+    router: &bimifc_geometry::GeometryRouter,
+    cache: &mut std::collections::HashMap<u32, bimifc_geometry::Mesh>,
+) -> Result<Option<bimifc_geometry::Mesh>, bimifc_geometry::error::Error> {
+    // Get Items (index 3 in IfcShapeRepresentation)
+    let items = match shape_rep.get(3) {
+        Some(bimifc_model::AttributeValue::List(list)) => list,
+        _ => return Ok(None),
+    };
+
+    let mut combined = bimifc_geometry::Mesh::new();
+
+    for item_ref in items {
+        if let Some(item_id) = item_ref.as_entity_ref() {
+            if let Some(item) = resolver.get(item_id) {
+                if item.ifc_type == bimifc_model::IfcType::IfcMappedItem {
+                    if let Some(mesh) = custom_process_mapped_item(&item, resolver, router, cache)?
+                    {
+                        combined.merge(&mesh);
+                    }
+                } else if item.ifc_type == bimifc_model::IfcType::IfcExtrudedAreaSolid
+                    || item.ifc_type == bimifc_model::IfcType::IfcRevolvedAreaSolid
+                {
+                    let mut modified_item = (*item).clone();
+                    if modified_item.attributes.len() > 1 {
+                        modified_item.attributes[1] = bimifc_model::AttributeValue::Null;
+                    }
+                    if let Ok(mut mesh) =
+                        router.process_representation_item(&modified_item, resolver)
+                    {
+                        let scale = router.unit_scale();
+
+                        // 1. Resolve and apply profile's Position transform (index 2 of SweptArea)
+                        if let Some(swept_id) = item.get_ref(0) {
+                            if let Some(swept) = resolver.get(swept_id) {
+                                if let Some(prof_pos_id) = swept.get_ref(2) {
+                                    if let Some(mut prof_pos_transform) =
+                                        resolve_axis2_placement_2d(prof_pos_id, resolver)
+                                    {
+                                        if scale != 1.0 {
+                                            prof_pos_transform[(0, 3)] *= scale;
+                                            prof_pos_transform[(1, 3)] *= scale;
+                                        }
+                                        bimifc_geometry::extrusion::apply_transform(
+                                            &mut mesh,
+                                            &prof_pos_transform,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Resolve and apply solid's original Position transform (index 1 of solid)
+                        if let Some(pos_id) = item.get_ref(1) {
+                            if let Some(mut pos_transform) =
+                                custom_resolve_placement(pos_id, resolver)
+                            {
+                                if scale != 1.0 {
+                                    pos_transform[(0, 3)] *= scale;
+                                    pos_transform[(1, 3)] *= scale;
+                                    pos_transform[(2, 3)] *= scale;
+                                }
+                                bimifc_geometry::extrusion::apply_transform(
+                                    &mut mesh,
+                                    &pos_transform,
+                                );
+                            }
+                        }
+
+                        combined.merge(&mesh);
+                    }
+                } else {
+                    match router.process_representation_item(&item, resolver) {
+                        Ok(mesh) => combined.merge(&mesh),
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+    }
+
+    if combined.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(combined))
+    }
+}
+
+fn custom_process_element(
+    element: &bimifc_model::DecodedEntity,
+    resolver: &dyn bimifc_model::EntityResolver,
+    router: &bimifc_geometry::GeometryRouter,
+    cache: &mut std::collections::HashMap<u32, bimifc_geometry::Mesh>,
+) -> Result<bimifc_geometry::Mesh, bimifc_geometry::error::Error> {
+    let mut combined_mesh = bimifc_geometry::Mesh::new();
+
+    // Get Representation (typically at index 6 for products)
+    let rep_id = match element.get_ref(6) {
+        Some(id) => id,
+        None => return Ok(combined_mesh), // No representation
+    };
+
+    let representation = match resolver.get(rep_id) {
+        Some(rep) => rep,
+        None => return Ok(combined_mesh),
+    };
+
+    // Get Representations list (index 2 in IfcProductDefinitionShape)
+    // IfcProductRepresentation: 0=Name, 1=Description, 2=Representations
+    let reps = match representation.get(2) {
+        Some(bimifc_model::AttributeValue::List(list)) => list,
+        _ => return Ok(combined_mesh),
+    };
+
+    // Process each shape representation
+    for rep_ref in reps {
+        if let Some(shape_rep_id) = rep_ref.as_entity_ref() {
+            if let Some(shape_rep) = resolver.get(shape_rep_id) {
+                // Filter: skip non-geometry representations (e.g., "Axis", "Box", "FootPrint")
+                // Attribute 1: RepresentationIdentifier (e.g., "Body", "Facetation")
+                if let Some(rep_id_str) = shape_rep.get_string(1) {
+                    if !matches!(
+                        rep_id_str,
+                        "Body" | "Facetation" | "Reference" | "MappedRepresentation"
+                    ) {
+                        continue;
+                    }
+                }
+
+                // Process representation items
+                if let Some(mesh) =
+                    custom_process_shape_representation(&shape_rep, resolver, router, cache)?
+                {
+                    combined_mesh.merge(&mesh);
+                }
+            }
+        }
+    }
+
+    // Apply object placement transform
+    if let Some(placement_id) = element.get_ref(5) {
+        if let Some(mut transform) = custom_resolve_placement(placement_id, resolver) {
+            if element.id.0 == 5548 {
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                    "WALL 5548 LOCAL BOUNDS: {:?}",
+                    combined_mesh.bounds()
+                )));
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                    "WALL 5548 TRANSFORM MATRIX: {:?}",
+                    transform
+                )));
+            }
+            // Scale translation components from file units to meters
+            let scale = router.unit_scale();
+            if scale != 1.0 {
+                transform[(0, 3)] *= scale;
+                transform[(1, 3)] *= scale;
+                transform[(2, 3)] *= scale;
+            }
+            bimifc_geometry::extrusion::apply_transform(&mut combined_mesh, &transform);
+            if element.id.0 == 5548 {
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                    "WALL 5548 TRANSFORMED BOUNDS: {:?}",
+                    combined_mesh.bounds()
+                )));
+            }
+        }
+    }
+
+    Ok(combined_mesh)
+}
+
+fn log_placement_chain(
+    placement_id: bimifc_model::EntityId,
+    resolver: &dyn bimifc_model::EntityResolver,
+    indent: &str,
+) {
+    if let Some(placement) = resolver.get(placement_id) {
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+            "{}PLACEMENT: id={:?} type={:?} attrs={:?}",
+            indent, placement_id, placement.ifc_type, placement.attributes
+        )));
+        if placement.ifc_type == bimifc_model::IfcType::IfcLocalPlacement {
+            // RelTo (index 0)
+            if let Some(rel_to_id) = placement.get_ref(0) {
+                log_placement_chain(rel_to_id, resolver, &format!("{}  ", indent));
+            }
+            // Relative (index 1)
+            if let Some(rel_id) = placement.get_ref(1) {
+                if let Some(rel) = resolver.get(rel_id) {
+                    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                        "{}  RELATIVE: id={:?} type={:?} attrs={:?}",
+                        indent, rel_id, rel.ifc_type, rel.attributes
+                    )));
+                }
+            }
+        }
+    }
+}

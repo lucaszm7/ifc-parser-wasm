@@ -18,9 +18,11 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
   "Document", "Window", "HtmlCanvasElement", 
-  "MouseEvent", "WheelEvent"
+  "MouseEvent", "WheelEvent", "console"
 ] }
 wgpu = "29.0.1"
 glam = "0.29.0"
 bytemuck = { version = "1.19.0", features = ["derive"] }
 pollster = "0.3.0"
+nalgebra = "0.33"
+
